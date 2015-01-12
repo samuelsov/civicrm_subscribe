@@ -1,0 +1,469 @@
+<?php
+/**
+ * @file
+ * Provides a page callback and blocks for subscribing to CiviCRM groups.
+ *
+ * The blocks provided by this module can subscribe users to hidden CiviCRM groups.
+ */
+
+function civicrm_subscribe_menu() {
+  $items = array();
+  $items['user/subscribe'] = array(
+    'title' => t('User Signup'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('civicrm_subscribe_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/confirm'] = array(
+    'title' => t('Confirm User Signup'),
+    'page callback' => 'civicrm_subscribe_confirm_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/settings/civicrm_subscribe'] = array(
+    'title' => t('Subscribe'),
+    'description' => t('CiviCRM Subscribe Settings'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('civicrm_subscribe_admin_settings'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+function civicrm_subscribe_admin_settings() {
+  if (module_exists('civicrm')) {
+    civicrm_initialize();
+
+    $options = array();
+    $params = array(
+      'return' => array('id', 'title'),
+      'rowCount' => 1000, /* no limit */
+    );
+    try {
+      $groups =& civicrm_api3('Group', 'get', $params);
+    }
+    catch (CiviCRM_API3_Exception $e) {
+      watchdog('civicrm_subscribe', 'Error while fetching groups : ' . $e->getMessage());
+    }
+
+    if (!$groups['is_error']) {
+      foreach ($groups as $group) {
+        $options[$group["id"]] = $group["title"];
+      }
+    }
+    asort($options);
+
+    $form['civicrm_subscribe_groups'] = array(
+      '#type' => 'select',
+      '#title' => t('Subscription Groups'),
+      '#options' => $options,
+      '#multiple' => 1,
+      '#default_value' => variable_get('civicrm_subscribe_groups', 0),
+      '#description' => t("Select the CiviCRM groups users can subscribe to.")
+    );
+    $form['civicrm_subscribe_message'] = array(
+	    '#type' => 'textfield',
+	    '#title' => t('Subscription message'),
+	    '#default_value' => variable_get('civicrm_subscribe_message', 'Enter your email address to subscribe to %group_name.'),
+	    '#description' => t('Enter the message displayed in the subscription block. Note: <strong>%group_name</strong> will automatically print the name of your email list.')
+    );
+  }
+
+  return system_settings_form($form);
+}
+
+function civicrm_subscribe_form(&$form_state, $group_id = -1) {
+  if(isset($group_id) && $group_id != -1) {
+    $groups = array($group_id);
+  }
+  else {
+    // look for a group_id in the path (user/subscribe/$group_id)
+    $groups = (arg(0) == 'user' && arg(1) == 'subscribe' && is_numeric($group_id = arg(2))) ? array($group_id) : array();
+  }
+  
+  // make sure that the path is a valid group that allows subscriptions
+  $groups = _civicrm_subscribe_get_groups($groups);
+  
+  if (count($groups)) {
+    $group_name = 'this group';
+    if (module_exists('civicrm')) {
+      civicrm_initialize();
+
+      $group_names = array();
+      foreach ($groups as $group_id) {
+        $params = array('id' => $group_id);
+        try {
+          $ccrm_groups =& civicrm_api3('Group', 'getsingle', $params);
+        } catch (CiviCRM_API3_Exception $e) {
+          watchdog('civicrm_subscribe', 'Error while fetching group ' . $group_id . ' : ' . $e->getMessage());
+        }
+        $group_names[] = _civicrm_subscribe_get_group_name(current($ccrm_groups));
+      }
+      $group_name = implode(', ', $group_names);
+    }
+    $help = t(variable_get('civicrm_subscribe_message','Enter your email address to subscribe to %group_name.'), array('%group_name' => $group_name));
+    count($groups) == 1 ? $url_params = '/' . $group_id : $url_params = '';
+    return array(
+      '#action' => url('user/subscribe' . $url_params, array('query' => 'destination='. $_GET['q'])),
+      '#submit' => array('civicrm_subscribe_form_submit'),
+      '#validate' => array('civicrm_subscribe_form_validate'),
+      'groups' => array(
+        '#type' => 'hidden',
+        '#value' => implode(',', $groups),
+      ),
+      'help' => array(
+        '#value' => $help,
+      ),
+      'email' => array(
+        '#type' => 'textfield',
+        '#title' => t('Email Address'),
+        '#required' => 1,
+        '#size' => 30,
+      ),
+      'submit' => array(
+        '#type' => 'submit',
+        '#value' => t('Subscribe'),
+      ),
+    );
+    return $form;
+  }
+  drupal_set_message(_civicrm_subscribe_invalid_group());
+}
+
+function _civicrm_subscribe_invalid_group() {
+  return t('You cannot sign up for this group, contact your system administrator, edit the <a href="@url">settings</a> page, or try another group.', array('@url' => url('admin/settings/civicrm_subscribe')));
+}
+
+function _civicrm_subscribe_get_groups($groups = array()) {
+  // convert non-arrayed request arguments into an array for easier handling below
+  if (!is_array($groups)) {
+    $groups = array($groups);
+  }
+
+  // get the list of valid civicrm_subscribe groups (from the settings form)
+  $valid_groups = variable_get('civicrm_subscribe_groups', array());
+  if (count($groups) > 0) {
+    // make sure that each specified group is valid, this prevents spoofing
+    // the submit form
+    foreach ($groups as $index => $group_id) {
+      if (is_numeric($group_id)) {
+        if (!in_array($group_id, $valid_groups)) {
+          unset($groups[$index]);
+        }
+      }
+    }
+  }
+  else {
+    $groups = $valid_groups;
+  }
+
+  // let a custom module modify the default groups to subscribe to.  This allows
+  // you to modify the subscription groups based on context
+  $groups += module_invoke_all('civicrm_subscribe_groups', $groups);
+
+  // if a group wasn't specific, then return all valid groups
+  return $groups;
+}
+
+function civicrm_subscribe_form_submit($form, &$form_state) {
+  civicrm_initialize();
+
+  // when posting the form, get the groups from the hidden field
+  // $groups = explode(',', $form_values['groups']);
+  // @HELP: form_values is getting sanitized somewhere, and since we're no
+  //  longer on the original referring node, the groups are different if
+  //  hook_civicrm_subscribe_groups altered the list.  So, get the original
+  //  $_POST values.  This seems insecure, but FAPI validates that the form
+  //  being processed is the one that was submitted, so, is it insecure?
+  if (isset($_POST['groups'])) {
+    $groups = explode(',', $_POST['groups']);
+  }
+
+  foreach ($groups as $group_id) {
+    $params = array('id' => $group_id);
+    try {
+      $ccrm_group =& civicrm_api3('Group', 'getsingle', $params);
+    } catch (CiviCRM_API3_Exception $e) {
+      watchdog('civicrm_subscribe', 'Error while fetching group ' . $group_id . ' : ' . $e->getMessage());
+    }
+    $group_names[] = _civicrm_subscribe_get_group_name($ccrm_group);
+
+    $contact_added = civicrm_subscribe($form_state['values']['email'], $group_id, $api);
+  }
+  $group_name = implode(', ', $group_names);
+
+  if ($contact_added == TRUE) {
+    drupal_set_message(_civicrm_subscribe_variable_get_page_submitted($group_name));
+  }
+  else {
+    drupal_set_message("Subscription error.");
+  }
+}
+
+/**
+ * Wrapper function for the alternative mailer functions based on API version.
+ *
+ * civicrm_subscribe() can be called by other modules,
+ * but civicrm_subscribe_get_api_version()
+ * and civicrm_subscribe_include_mailer($api) should be called first.
+ *
+ * @param string $email
+ *   A valid email address.
+ *
+ * @param int $group_id
+ *   A valid CiviCRM group ID.
+ *
+ * @param boolean $api
+ *   CiviCRM API version (1 or 2).
+ *
+ * @return boolean $contact_added
+ *   Whether the contact was successfully added to the group.
+ *
+ */
+function civicrm_subscribe($email, $group_id) {
+  $params = array (
+    'email'          => $email,
+    'group_id'       => $group_id,
+  );
+
+  try {
+    $result = civicrm_api3('MailingEventSubscribe', 'create', $params);
+  } catch (CiviCRM_API3_Exception $e) {
+    watchdog('civicrm_subscribe', 'Failed while trying to send double optin message for params ' . print_r($params, 1) . ' Error : ' . $e->getMessage());
+  }
+
+  return $result;
+}
+
+function civicrm_subscribe_form_validate($form, &$form_state) {
+  if (user_validate_mail($form_state['values']['email'])) {
+    form_set_error('email', t('Your email address is invalid.'));
+  }
+}
+
+function _civicrm_subscribe_insert($ccid, $hash) {
+  if (!db_result(db_query("SELECT ccid FROM {civicrm_subscribe} WHERE ccid='%s'", $ccid))) {
+    db_query("INSERT INTO {civicrm_subscribe} (ccid, hash) VALUES (%d, '%s')", $ccid, $hash);
+  }
+}
+
+function _civicrm_subscribe_error($error = 0) {
+  if ($error != 0) {
+  foreach ($error->_errors as $err) {
+    $msgs[] = $err['code'] .': '. $err['message'];
+  }
+  $params = array('@msgs' => implode('; ', $msgs));
+  return t('subscription error: @msgs', $params); }
+  else {
+  return t('subscription error');
+  }
+}
+
+function civicrm_subscribe_confirm_page() {
+  if (module_exists('civicrm')) {
+    if ($ccid = db_result(db_query("SELECT ccid FROM {civicrm_subscribe} WHERE hash='%s'", arg(2)))) {
+      civicrm_initialize();
+
+      $params = array('contact_id' => $ccid);
+      try {
+        $contact =& civicrm_api3('Contact', 'getsingle', $params);
+      } catch (CiviCRM_API3_Exception $e) {
+        watchdog('civicrm_subscribe', 'Failed to get contact id=' . $ccid . ' : ' . $e->getMessage());
+      }
+
+      if ($contact && isset($contact['contact_id'])) {
+        // enable emailing now that this contact's email has been confirmed
+        $params = array('contact_id' => $contact['contact_id'], 'contact_type' => $contact['contact_type'], 'do_not_email' => 0);
+        $contact = civicrm_api3('Contact', 'create', $params);
+        $confirmed = 1;
+
+        // if we need to create a Drupal user,
+        if (variable_get('civicrm_subscribe_drupal_account', 0)) {
+          // make sure the user doesn't exist first
+          // NOTE: this is slightly different than the reset password hash link,
+          //  don't allow this as a backdoor to logging in
+          $email = $contact->location[1]->email[1]->email;
+          if (!user_load(array('mail' => $email))) {
+            // create the new Drupal user
+            $userinfo = array(
+              'name' => $email,
+              'mail' => $email,
+              'pass' => user_password(),
+              'init' => $name,
+              'status' => 1
+            );
+            global $user;
+            $user = user_save('', $userinfo);
+            watchdog('user', 'New external user: %user using module %module.', array('%user' => $email, '%module' => 'civicrm_subscribe'), WATCHDOG_NOTICE, l(t('edit'), 'user/'. $user->uid .'/edit'));
+
+            // Update the user table noting user has logged in.
+            db_query("UPDATE {users} SET login = %d WHERE uid = %d", time(), $account->uid);
+
+            // proceed with normal login
+            $edit = array();
+            user_module_invoke('login', $edit, $user);
+
+            // going to user page.
+            drupal_set_message(_civicrm_subscribe_variable_get_page_confirmed());
+            drupal_goto('user/'. $user->uid .'/edit');
+//          return;
+          }
+        }
+
+        drupal_set_message(_civicrm_subscribe_variable_get_page_confirmed());
+      }
+    }
+    if (!isset($confirmed)) {
+      drupal_set_message(t('invalid confirmation code, please <a href="@url">subscribe</a> again.', array('@url' => url('user/subscribe'))));
+    }
+  }
+  drupal_goto();
+}
+
+function _civicrm_subscribe_send_confirm_email($email, $hash, $group_name = 'this group') {
+  //drupal_mail('civicrm-subscribe-confirm', $email, $subject, $body);
+  drupal_mail('civicrm_subscribe', 'subscribe', $email, language_default(), array('hash' => $hash, 'group_name' => $group_name, 'email' => $email));
+}
+
+function _civicrm_subscribe_send_reconfirm_email($email, $hash) {
+  //drupal_mail('civicrm-subscribe-confirm', $email, $subject, $body);
+  drupal_mail('civicrm_subscribe', 'confirm', $email, language_default(), array('hash' => $hash, 'group_name' => $group_name, 'email' => $email));
+}
+
+function civicrm_subscribe_mail($key, &$message, $params) {
+  switch ($key) {
+    case 'subscribe':
+      $message['subject'] = _civicrm_subscribe_variable_get_email_subject();
+      $message['body'] = _civicrm_subscribe_variable_get_email_body();
+
+      // replace common values
+      // @TODO: use token.module?
+      $search = array('%confirm_link', '%group_name', '%email');
+      $confirm_link = url('user/confirm/'. $params['hash'], array('query' => NULL, 'fragment' => NULL, 'absolute' => TRUE));
+      $replace = array($confirm_link, $params['group_name'], $params['email']);
+      $message['body'] = str_replace($search, $replace, $message['body']);
+      break;
+
+    case 'confirm':
+      $message['subject'] = _civicrm_subscribe_variable_get_email_reconfirm_subject();
+      $message['body'] = _civicrm_subscribe_variable_get_email_reconfirm_body();
+
+      // replace common values
+      // @TODO: use token.module?
+      $search = array('%confirm_link', '%email');
+      $confirm_link = url('user/confirm/'. $params['hash'], array('query' => NULL, 'fragment' => NULL, 'absolute' => TRUE));
+      $replace = array($confirm_link, $params['email']);
+      $message['body'] = str_replace($search, $replace, $message['body']);
+      break;
+    }
+}
+
+function _civicrm_subscribe_variable_get_email_body() {
+  if ($body = variable_get('civicrm_subscribe_email_body', '')) {
+    return $body;
+  }
+  return t("Please confirm your subscription:\n\n%confirm_link");
+}
+
+function _civicrm_subscribe_variable_get_email_reconfirm_body() {
+  if ($body = variable_get('civicrm_subscribe_email_reconfirm_body', '')) {
+    return $body;
+  }
+  return t("Please reconfirm your new email address:\n\n%confirm_link");
+}
+
+function _civicrm_subscribe_variable_get_email_subject() {
+  return variable_get('civicrm_subscribe_email_subject', t('Please confirm your subscription'));
+}
+
+function _civicrm_subscribe_variable_get_email_reconfirm_subject() {
+  return variable_get('civicrm_subscribe_email_reconfirm_subject', t('Please re-confirm your new email address'));
+}
+
+function _civicrm_subscribe_variable_get_page_submitted($group_name = NULL) {
+  $submitted = variable_get('civicrm_subscribe_page_submitted', t('Thank you for subscribing to %group_name.  You will receive a confirmation email shortly.'));
+
+  if ($group_name) {
+    $submitted = str_replace('%group_name', $group_name, $submitted);
+  }
+
+  return $submitted;
+}
+
+function _civicrm_subscribe_variable_get_page_reconfirm_submitted() {
+  return variable_get('civicrm_subscribe_page_reconfirm_submitted', t('Thank you for updating your email with us.  You will receive a confirmation email shortly.'));
+}
+
+function _civicrm_subscribe_get_group_name($group) {
+  return isset($group['title']) ? $group['title'] : $group['name'];
+}
+
+function _civicrm_subscribe_variable_get_page_confirmed() {
+  return variable_get('civicrm_subscribe_page_confirmed', t('Your subscription signup is complete!'));
+}
+
+/**
+ * Implementation of hook_user
+ * invalidates the CCRM email address for the user and sends a new confirmation
+ */
+function civicrm_subscribe_user($type, &$edit, &$edituser, $category = NULL) {
+  // when a user changes their own email address on the user edit form
+  global $user;
+  if (module_exists('civicrm') && $type == 'submit' && $category == 'account' && $edituser->mail != $edit['mail'] && $user->uid == $edituser->uid) {
+    // find the existing civicrm contact record
+    civicrm_initialize();
+
+    $params = array('email' => $edituser->mail);
+    $contacts =& civicrm_api3('Contact', 'get', $params);
+    $contact = array_shift($contacts['values']);
+    if (isset($contact['contact_id'])) {
+      // change the civicrm email, and set the flag to do not email while we confirm the new email address
+      $params = array(
+        'contact_id' => $contact['contact_id'],
+        'contact_type' => $contact['contact_type'],
+        'email' => $edit['mail'],
+        'do_not_email' => TRUE,
+      );
+      $contact =& civicrm_api3('Contact', 'create', $params);
+
+      $hash = md5( uniqid( rand( ), TRUE ) );
+      _civicrm_subscribe_insert($contact['contact_id'], $hash);
+      // send the re-confirmation email
+      _civicrm_subscribe_send_reconfirm_email($edit['mail'], $hash);
+
+      // display message to user
+      drupal_set_message(_civicrm_subscribe_variable_get_page_reconfirm_submitted());
+    }
+  }
+}
+
+function civicrm_subscribe_block($op = 'list', $delta = 0, $edit = array()) {
+  if (!module_exists('civicrm')) {
+    return;
+  }
+  civicrm_initialize();
+
+  switch ($op) {
+    case 'list':
+      $groups = variable_get('civicrm_subscribe_groups', array());
+      foreach ($groups as $group_id) {
+        $params = array('id' => $group_id);
+        try {
+          $ccrm_groups =& civicrm_api3('Group', 'getsingle', $params);
+        } catch (CiviCRM_API3_Exception $e) {
+           watchdog('civicrm_subscribe', 'Error while fetching group ' . $group_id . ' (in block) : ' . $e->getMessage());
+        }
+        $group_name = _civicrm_subscribe_get_group_name(array_pop($ccrm_groups));
+        $blocks[$group_id]['info'] = t('CiviCRM Subscribe: @group_name', array('@group_name' => $group_name));
+      }
+      return $blocks;
+
+    case 'view':
+      $block['subject'] = t('Subscribe');
+      $block['content'] = drupal_get_form('civicrm_subscribe_form', $delta, $email_only);
+      return $block;
+  }
+}
+

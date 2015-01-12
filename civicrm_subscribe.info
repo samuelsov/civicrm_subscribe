@@ -1,0 +1,10 @@
+name = CiviCRM Subscribe
+description = "Allow users to subscribe (double opt-in) to a CiviCRM group without creating a Drupal user"
+dependencies[] = civicrm
+package = CiviCRM
+core = 6.x
+
+version = "6.x-2.0-beta1"
+project = "civicrm_subscribe"
+
+

@@ -1,0 +1,111 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for the CiviCRM Subscribe module.
+ */
+
+function civicrm_subscribe_schema() {
+  $schema = array();
+  $schema['civicrm_subscribe'] = array(
+    'description' => t('CiviCRM contact id tracking'),
+    'fields' => array(
+      'ccid' => array(
+        'description' => t('CiviCRM contact id'),
+        'type' => 'int',
+        'size' => 'normal',
+        'unsigned' => TRUE,
+        'not null' => TRUE
+      ),
+      'hash' => array(
+        'type' => 'varchar',
+        'length' => 8,
+        'default' => 'NULL'
+      ),
+    ),
+    'primary key' => array('ccid'),
+    'indexes' => array('hash' => array('hash')),
+  );
+  $schema['civicrm_subscribe_form'] = array(
+    'description' => t('Group to use in a CiviCRM subscribe block form'),
+    'fields' => array(
+      'group_id' => array(
+        'description' => t('CiviCRM group id'),
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'email_only' => array(
+        'description' => t('Whether this is an email-only form'),
+        'type' => 'int',
+        'not null' => FALSE,
+        'default' => 0,
+      ),
+    ),
+  'primary key' => array('group_id'),
+  );
+  return $schema;
+}
+
+function civicrm_subscribe_install() {
+  drupal_install_schema('civicrm_subscribe');
+}
+
+function civicrm_subscribe_uninstall() {
+  drupal_uninstall_schema('civicrm_subscribe');
+}
+
+function civicrm_subscribe_update_6101() {
+  /* update function for earlier versions of CiviCRM Subscribe:
+     these versions may be missing required tables */
+  $schema = array();
+  $schema['civicrm_subscribe'] = array(
+    'description' => t('CiviCRM contact id tracking'),
+    'fields' => array(
+      'ccid' => array(
+        'description' => t('CiviCRM contact id'),
+        'type' => 'int',
+        'size' => 'normal',
+        'unsigned' => TRUE,
+        'not null' => TRUE
+      ),
+      'hash' => array(
+        'type' => 'varchar',
+        'length' => 8,
+        'default' => 'NULL'
+      ),
+    ),
+    'primary key' => array('ccid'),
+    'indexes' => array('hash' => array('hash')),
+  );
+  $schema['civicrm_subscribe_form'] = array(
+    'description' => t('Group to use in a CiviCRM subscribe block form'),
+    'fields' => array(
+      'group_id' => array(
+        'description' => t('CiviCRM group id'),
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'email_only' => array(
+        'description' => t('Whether this is an email-only form'),
+        'type' => 'int',
+        'not null' => FALSE,
+        'default' => 0,
+      ),
+    ),
+  'primary key' => array('group_id'),
+  );
+
+  $ret = array();
+
+  if (!db_table_exists('civicrm_subscribe')) {
+    db_create_table($ret, 'civicrm_subscribe', $schema['civicrm_subscribe']);
+  }
+
+  if (!db_table_exists('civicrm_subscribe_form')) {
+    db_create_table($ret, 'civicrm_subscribe_form', $schema['civicrm_subscribe_form']);
+  }
+
+  return $ret;
+}
+
