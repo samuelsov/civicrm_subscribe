@@ -49,7 +49,7 @@ function civicrm_subscribe_admin_settings() {
     }
 
     if (!$groups['is_error']) {
-      foreach ($groups as $group) {
+      foreach ($groups['values'] as $group) {
         $options[$group["id"]] = $group["title"];
       }
     }
